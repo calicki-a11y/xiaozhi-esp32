@@ -6,7 +6,8 @@
         {
             "name": "esp32-s3-touch-amoled-1.8-v2",
             "sdkconfig_append": [
-                "CONFIG_USE_WECHAT_MESSAGE_STYLE=n"
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
+                "CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=y"
             ]
         }
     ]
