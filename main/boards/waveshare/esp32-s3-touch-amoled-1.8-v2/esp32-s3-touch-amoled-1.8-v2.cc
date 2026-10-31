@@ -21,6 +21,9 @@
 #include <driver/spi_master.h>
 #include "esp_io_expander_tca9554.h"
 #include "settings.h"
+#include <driver/uart.h>
+#include <driver/gpio.h>
+#include <cstring>
 
 #include <esp_lcd_touch_cst816s.h>
 #include <esp_lvgl_port.h>
@@ -100,6 +103,58 @@ static const co5300_lcd_init_cmd_t vendor_specific_init[] = {
     {0x29, (uint8_t[]){0x00}, 0, 600},
 };
 
+// ===================== MINZI: Verbindung Kopf -> Koerper =====================
+// Schickt Woerter (z.B. "happy", "vor") ueber einen Draht an den Arduino Nano im Koerper.
+// Der Anschluss (GPIO) wird erst eingeschaltet, wenn er gesetzt ist (Werkzeug
+// "self.minzi.koerper_pin", gespeichert im Geraet). Standard: aus (-1).
+class MinziKoerper {
+public:
+    static MinziKoerper& Instance() { static MinziKoerper k; return k; }
+
+    static bool PinErlaubt(int pin) {
+        if (pin < 0) return true;                       // -1 = aus
+        if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) return false;
+        // vom Board benutzt (Display, Audio, I2C, Taste, USB) oder Flash/PSRAM
+        static const int belegt[] = {0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 19, 20, 45, 46};
+        for (int b : belegt) if (pin == b) return false;
+        if (pin >= 26 && pin <= 37) return false;
+        return true;
+    }
+
+    bool SetPin(int pin) {
+        if (!PinErlaubt(pin)) { ESP_LOGW("Minzi", "GPIO %d nicht erlaubt", pin); return false; }
+        if (installiert_) { uart_driver_delete(UART_NUM_1); installiert_ = false; }
+        pin_ = pin;
+        if (pin_ < 0) return true;
+        uart_config_t cfg = {};
+        cfg.baud_rate = 9600;
+        cfg.data_bits = UART_DATA_8_BITS;
+        cfg.parity = UART_PARITY_DISABLE;
+        cfg.stop_bits = UART_STOP_BITS_1;
+        cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+        cfg.source_clk = UART_SCLK_DEFAULT;
+        if (uart_driver_install(UART_NUM_1, 256, 0, 0, NULL, 0) != ESP_OK) return false;
+        uart_param_config(UART_NUM_1, &cfg);
+        uart_set_pin(UART_NUM_1, pin_, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        installiert_ = true;
+        ESP_LOGI("Minzi", "Koerper-Draht auf GPIO %d", pin_);
+        return true;
+    }
+
+    int Pin() const { return pin_; }
+
+    void Senden(const char* wort) {
+        if (!installiert_ || wort == nullptr) return;
+        uart_write_bytes(UART_NUM_1, wort, strlen(wort));
+        uart_write_bytes(UART_NUM_1, "\n", 1);
+    }
+
+private:
+    int pin_ = -1;
+    bool installiert_ = false;
+};
+// ============================================================================
+
 // 在waveshare_amoled_1_8类之前添加新的显示类
 class CustomLcdDisplay : public SpiLcdDisplay {
 public:
@@ -125,6 +180,13 @@ public:
         DisplayLockGuard lock(this);
         lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES * 0.1, 0);
         lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES * 0.1, 0);
+    }
+
+    // MINZI: jedes Gesicht auch an den Koerper melden
+    virtual bool SetEmotion(const char* emotion) override {
+        bool ok = SpiLcdDisplay::SetEmotion(emotion);
+        MinziKoerper::Instance().Senden(emotion);
+        return ok;
     }
 };
 
@@ -372,6 +434,31 @@ private:
                 EnterWifiConfigMode();
                 return true;
             });
+
+        // MINZI: Koerper steuern (z.B. "happy", "vor", "zurueck", "links", "rechts", "stopp", "hallo")
+        mcp_server.AddTool("self.minzi.koerper",
+            "Send a command word to Minzi's body (arms, head, wheels).",
+            PropertyList({Property("befehl", kPropertyTypeString)}),
+            [](const PropertyList& properties) {
+                std::string w = properties["befehl"].value<std::string>();
+                MinziKoerper::Instance().Senden(w.c_str());
+                return true;
+            });
+        // MINZI: Anschluss fuer den Koerper-Draht festlegen (-1 = aus), wird gespeichert
+        mcp_server.AddTool("self.minzi.koerper_pin",
+            "Set the GPIO used for the wire to Minzi's body (-1 = off).",
+            PropertyList({Property("pin", kPropertyTypeInteger, -1, -1, 48)}),
+            [](const PropertyList& properties) {
+                int pin = properties["pin"].value<int>();
+                if (!MinziKoerper::Instance().SetPin(pin)) return false;
+                Settings settings("minzi", true);
+                settings.SetInt("koerper_pin", pin);
+                return true;
+            });
+        {
+            Settings settings("minzi", false);
+            MinziKoerper::Instance().SetPin(settings.GetInt("koerper_pin", -1));
+        }
     }
 
 public:
