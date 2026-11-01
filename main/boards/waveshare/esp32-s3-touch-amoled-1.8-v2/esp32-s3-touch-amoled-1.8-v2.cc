@@ -1,3 +1,4 @@
+// Minzi 2.5.5
 #include "wifi_board.h"
 #include "display/lcd_display.h"
 #include "esp_lcd_co5300.h"
