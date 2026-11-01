@@ -29,7 +29,44 @@
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
 
+#include <esp_timer.h>
+
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch8"
+
+// MINZI: Display antippen = wie die BOOT-Taste (unterbricht Minzi beim Sprechen, startet im Standby)
+static void MinziTouchEvent(lv_event_t* e) {
+    static int64_t druck_t = 0, letzter = 0;
+    lv_event_code_t code = lv_event_get_code(e);
+    int64_t jetzt = esp_timer_get_time() / 1000;
+    if (code == LV_EVENT_PRESSED) {
+        druck_t = jetzt;
+    } else if (code == LV_EVENT_RELEASED) {
+        if (druck_t != 0 && jetzt - druck_t < 700 && jetzt - letzter > 800) {
+            letzter = jetzt;
+            auto& app = Application::GetInstance();
+            DeviceState st = app.GetDeviceState();
+            if (st == kDeviceStateSpeaking || st == kDeviceStateIdle) {
+                app.ToggleChatState();
+            }
+        }
+        druck_t = 0;
+    }
+}
+
+// MINZI: nach dem Einschalten automatisch zuhoeren (ohne BOOT-Taste)
+static void MinziAutoStartTask(void* arg) {
+    auto& app = Application::GetInstance();
+    for (int i = 0; i < 1200; i++) {            // bis zu 2 Minuten auf den Standby warten
+        if (app.GetDeviceState() == kDeviceStateIdle) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    if (app.GetDeviceState() == kDeviceStateIdle) {
+        ESP_LOGI("Minzi", "Automatisch zuhoeren nach dem Start");
+        app.ToggleChatState();
+    }
+    vTaskDelete(NULL);
+}
 
 class Pmic : public Axp2101 {
 public:
@@ -420,7 +457,11 @@ private:
             .disp = lv_display_get_default(),
             .handle = tp,
         };
-        lvgl_port_add_touch(&touch_cfg);
+        lv_indev_t* indev = lvgl_port_add_touch(&touch_cfg);
+        if (indev != nullptr && lvgl_port_lock(0)) {
+            lv_indev_add_event_cb(indev, MinziTouchEvent, LV_EVENT_ALL, nullptr);
+            lvgl_port_unlock();
+        }
         ESP_LOGI(TAG, "Touch panel initialized successfully");
     }
 
@@ -473,6 +514,7 @@ public:
          InitializeTouch();
         InitializeButtons();
         InitializeTools();
+        xTaskCreate(MinziAutoStartTask, "minzi_auto", 3072, NULL, 2, NULL);
     }
 
     virtual AudioCodec* GetAudioCodec() override {
